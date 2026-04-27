@@ -18,45 +18,47 @@ public class Plugin : BasePlugin
 {
     internal static new ManualLogSource Log = null!;
 
-    internal static ConfigEntry<StringList> BlockedNameplates;
+    internal static ConfigEntry<bool> Enabled = null!;
+    internal static ConfigEntry<bool> Invert = null!;
+    internal static ConfigEntry<StringSet> BlockedNameplates = null!;
+    internal static ConfigEntry<StringSet> AllowedNameplates = null!;
 
     public override void Load()
     {
         Log = base.Log;
 
-        TomlTypeConverter.AddConverter(typeof(StringList), new TypeConverter
+        TomlTypeConverter.AddConverter(typeof(StringSet), new TypeConverter
         {
-            ConvertToObject = (str, _) => StringList.Parse(str),
-            ConvertToString = (obj, _) => ((StringList)obj).ToString()
+            ConvertToObject = (str, _) => StringSet.Parse(str),
+            ConvertToString = (obj, _) => ((StringSet)obj).ToString()
         });
 
-        BlockedNameplates = Config.Bind("General", "Blocked Nameplates", new StringList(), new ConfigDescription("Blocked Nameplates", null, "Hidden"));
-        Config.Bind("General", "Update Current", default(dummy), new ConfigDescription("Updates current nameplates", null, UpdateVisibility, "Hidden"));
+        Enabled = Config.Bind("General", "Enabled", true, "Enable the plugin");
+        Enabled.SettingChanged += RunChange;
+        Invert = Config.Bind("General", "Invert", false, "Invert the logic\nWhen enabled, if UseCustomNameplates is disabled, you can specifically allow certain nameplates");
+        Invert.SettingChanged += RunChange;
+
+        BlockedNameplates = Config.Bind("Lists", "Blocked Nameplates", new StringSet(), "Blocked Nameplates -\n By UserID, separated by commas");
+        AllowedNameplates = Config.Bind("Lists", "Allowed Nameplates", new StringSet(), "Allowed Nameplates -\n By UserID, separated by commas");
+        Config.Bind("Lists", "Update Current Nameplates", default(dummy), new ConfigDescription("Updates current nameplates", null, UpdateVisibility));
 
         HarmonyInstance.PatchAll();
 
         Log.LogInfo($"Plugin {PluginMetadata.GUID} is loaded!");
     }
 
-    public static void ToggleUser(string id)
+    public static void RunChange(object? sender, EventArgs args) => UpdateVisibility();
+
+    public static void ToggleUser(string id, StringSet __set)
     {
-        StringList blockedNames = BlockedNameplates.Value;
-
-        if (!IsBlocked(id))
+        if (!__set.Add(id))
         {
-            blockedNames.Add(id);
+            __set.Remove(id);
         }
-        else
-        {
-            blockedNames.Remove(id);
-        }
-
-        Plugin.BlockedNameplates.Value = blockedNames;
 
         UpdateVisibility();
     }
 
-    public static bool IsBlocked(string id) => BlockedNameplates.Value.Contains(id);
 
     public static void UpdateVisibility() => NameplatePatch.AvailableDrivers.ForEach(d => d.UpdateVisibility());
 }
@@ -67,31 +69,48 @@ public class ContactsPatch
     [HarmonyPostfix]
     private static void PinUserAdder(ContactsDialog __instance, UIBuilder ___actionsUi)
     {
+        if (!Plugin.Enabled.Value) return;
+
         if (!__instance.World.IsUserspace()) return;
         if (__instance.SelectedContact == null || __instance.SelectedContactId == __instance.Cloud.Platform.AppUserId || __instance.SelectedContact.IsSelfContact)
             return;
 
         ___actionsUi.PushStyle();
 
-        Button pinButton = ___actionsUi.Button(Plugin.IsBlocked(__instance.SelectedContactId) ? "Unblock NP" : "Block NP");
-        pinButton.Slot.GetComponent<LayoutElement>().PreferredWidth.Value = 48;
-
-        int index = pinButton.Slot.ChildIndex;
+        float size = Plugin.Invert.Value ? 32f : 48f;
+        
+        Button blockButton = ___actionsUi.Button(Plugin.BlockedNameplates.Value.Contains(__instance.SelectedContactId) ? "Unblock NP" : "Block NP");
+        blockButton.Slot.GetComponent<LayoutElement>().PreferredWidth.Value = size;
+        blockButton.LocalPressed += (btn, _) =>
+        {
+            StringSet set = Plugin.BlockedNameplates.Value;
+            Plugin.ToggleUser(__instance.SelectedContactId, set);
+            
+            btn.LabelTextField.Value = set.Contains(__instance.SelectedContactId) ? "Unblock NP" : "Block NP";
+        };
+        
+        int index = blockButton.Slot.ChildIndex;
         if (index > 0)
         {
-            Slot prev = pinButton.Slot.Parent[index - 1];
+            Slot prev = blockButton.Slot.Parent[index - 1];
             if (prev.ChildrenCount > 0 && (prev[0].GetComponent<LocaleStringDriver>()?.Key.Value?.Contains("pin", StringComparison.OrdinalIgnoreCase) ?? false))
             {
-                prev.GetComponent<LayoutElement>().PreferredWidth.Value = 48;
+                prev.GetComponent<LayoutElement>().PreferredWidth.Value = 48f;
             }
         }
 
-        pinButton.LocalPressed += (btn, _) =>
+        if (Plugin.Invert.Value)
         {
-            Plugin.ToggleUser(__instance.SelectedContactId);
-
-            btn.LabelTextField.Value = Plugin.IsBlocked(__instance.SelectedContactId) ? "Unblock NP" : "Block NP";
-        };
+            Button allowButton = ___actionsUi.Button(Plugin.AllowedNameplates.Value.Contains(__instance.SelectedContactId) ? "Remove NP" : "Add NP");
+            allowButton.Slot.GetComponent<LayoutElement>().PreferredWidth.Value = size;
+            allowButton.LocalPressed += (btn, _) =>
+            {
+                StringSet set = Plugin.AllowedNameplates.Value;
+                Plugin.ToggleUser(__instance.SelectedContactId, set);
+            
+                btn.LabelTextField.Value = set.Contains(__instance.SelectedContactId) ? "Remove NP" : "Add NP";
+            };
+        }
 
         ___actionsUi.PopStyle();
     }
@@ -133,17 +152,23 @@ public class NameplatePatch
 
     public static bool ForceDefaultStyle(bool original, AvatarNameplateVisibilityDriver instance)
     {
+        if (!Plugin.Enabled.Value) return original;
+        
         User user = instance.Slot.ActiveUser;
         if (user == null) return original;
 
         string userId = user.UserID;
-
         if (string.IsNullOrEmpty(userId))
         {
-            userId = user.UserName;
+            return original;
         }
 
-        if (!string.IsNullOrEmpty(userId) && Plugin.IsBlocked(userId))
+        if (Plugin.Invert.Value && instance._settings != null && !instance._settings.UseCustomNameplates)
+        {
+            return Plugin.AllowedNameplates.Value.Contains(userId);
+        }
+
+        if (Plugin.BlockedNameplates.Value.Contains(userId))
         {
             return false;
         }
@@ -152,13 +177,13 @@ public class NameplatePatch
     }
 }
 
-public class StringList : List<string>
+public class StringSet : HashSet<string>
 {
-    public StringList() { }
+    public StringSet() : base(StringComparer.Ordinal) { }
 
-    public StringList(IEnumerable<string> items) : base(items) { }
+    public StringSet(IEnumerable<string> items) : base(items.Select(s => s.Trim()), StringComparer.Ordinal) { }
 
-    public override string ToString() => string.Join(", ", this.Select(s => s.Trim()));
+    public override string ToString() => string.Join(", ", this);
 
-    public static StringList Parse(string str) => new StringList(str.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(s => s.Trim()));
+    public static StringSet Parse(string str) => new StringSet(str.Split(',', StringSplitOptions.TrimEntries));
 }

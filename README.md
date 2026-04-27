@@ -1,7 +1,7 @@
 # NameplateBlocker
 [![Thunderstore Badge](https://modding.resonite.net/assets/available-on-thunderstore.svg)](https://thunderstore.io/c/resonite/)
 
-A [Resonite](https://resonite.com/) mod that will allows you to block nameplates showing the default nameplate of the user.
+A [Resonite](https://resonite.com/) mod - Allows you to block custom nameplates per user, or allow specific custom nameplates
 
 ## Installation (Manual)
 1. Install [BepisLoader](https://github.com/ResoniteModding/BepisLoader) for Resonite.
